@@ -1,0 +1,112 @@
+name: bench
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      runs:
+        description: "How many bench_compare repetitions to take median of"
+        required: false
+        default: "5"
+
+concurrency:
+  group: bench-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install third-party deps for PhotonLibOS
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libssl-dev libaio-dev libcurl4-openssl-dev liburing-dev
+
+      - name: Cache FetchContent (spdlog + PhotonLibOS)
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: deps-${{ runner.os }}-${{ hashFiles('benchmarks/CMakeLists.txt') }}
+          restore-keys: |
+            deps-${{ runner.os }}-
+
+      - name: Configure (Release + COMPARE)
+        run: |
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DELOG_BUILD_COMPARE=ON
+
+      - name: Build all benchmark binaries
+        run: |
+          cmake --build build -j --target \
+            bench_basic bench_perf bench_ablation bench_everyn \
+            bench_itoa bench_compose bench_compare
+
+      - name: Run unit tests (sanity)
+        run: ctest --test-dir build --output-on-failure -j
+
+      - name: bench_basic
+        run: ./build/benchmarks/bench_basic | tee bench_basic.txt
+
+      - name: bench_ablation
+        run: ./build/benchmarks/bench_ablation | tee bench_ablation.txt
+
+      - name: bench_itoa
+        run: ./build/benchmarks/bench_itoa | tee bench_itoa.txt
+
+      - name: bench_compose
+        run: ./build/benchmarks/bench_compose | tee bench_compose.txt
+
+      - name: bench_compare (multiple runs, median)
+        env:
+          NO_COLOR: "1"
+        run: |
+          RUNS="${{ github.event.inputs.runs || 5 }}"
+          echo "::group::individual runs"
+          for i in $(seq 1 "$RUNS"); do
+            echo "----- run $i / $RUNS -----"
+            ./build/benchmarks/bench_compare | tee "bench_compare_run_${i}.txt"
+          done
+          echo "::endgroup::"
+
+      - name: Upload benchmark outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-results-${{ github.run_id }}
+          path: |
+            bench_basic.txt
+            bench_ablation.txt
+            bench_itoa.txt
+            bench_compose.txt
+            bench_compare_run_*.txt
+          if-no-files-found: warn
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "# Benchmark summary"
+            echo ""
+            echo "Runner: $(uname -m), $(nproc) cores"
+            echo ""
+            echo "## bench_basic"
+            echo '```'
+            cat bench_basic.txt 2>/dev/null || echo "(missing)"
+            echo '```'
+            echo ""
+            echo "## bench_compose"
+            echo '```'
+            cat bench_compose.txt 2>/dev/null || echo "(missing)"
+            echo '```'
+            echo ""
+            echo "## bench_compare (last run)"
+            echo '```'
+            ls bench_compare_run_*.txt 2>/dev/null | tail -1 | xargs cat 2>/dev/null || echo "(missing)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

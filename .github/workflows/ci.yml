@@ -1,0 +1,61 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.compiler }} / ${{ matrix.build_type }}${{ matrix.lto && ' / LTO' || '' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+        build_type: [Release, Debug]
+        lto: [false]
+        include:
+          - compiler: gcc
+            build_type: Release
+            lto: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install compiler
+        run: |
+          if [ "${{ matrix.compiler }}" = "clang" ]; then
+            sudo apt-get update
+            sudo apt-get install -y clang
+            echo "CC=clang" >> "$GITHUB_ENV"
+            echo "CXX=clang++" >> "$GITHUB_ENV"
+          else
+            echo "CC=gcc" >> "$GITHUB_ENV"
+            echo "CXX=g++" >> "$GITHUB_ENV"
+          fi
+
+      - name: Configure
+        run: |
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+            -DELOG_LTO=${{ matrix.lto && 'ON' || 'OFF' }}
+
+      - name: Build
+        run: cmake --build build -j
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure -j
+
+      - name: Smoke-test examples
+        run: |
+          ./build/examples/basic
+          ./build/examples/multi_logger
+          ./build/examples/aggregation
+          ./build/examples/custom_type
+          ./build/examples/async_sink_skeleton
