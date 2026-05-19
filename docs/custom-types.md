@@ -111,29 +111,80 @@ LOG_INFO_F("user: {}", r);
 // user: name=alice ip=10.0.0.1
 ```
 
-The signature is the same as Pattern 1 except the return type. The same
-`scratch` and `pos` are still available — you can mix render-to-scratch
-fields with borrowed pointers in one pack:
+### Mixing strings, numerics, and built-in formatters
+
+Most real composite types contain a mix of:
+
+- string fields you want **zero-copy**
+- numeric fields that need **formatting** (precision, width, hex, ...)
+- literal separators (`"="`, `", "`, `" {"`, ...)
+
+The natural way is to call `elog_render` for each field — it returns the
+right `Iov` regardless of where the bytes live — and store the returned
+Iovs into the iov_pack buffer.
 
 ```cpp
+namespace trading {
+struct Trade {
+    std::string symbol;
+    double      price;
+    int         volume;
+    bool        is_buy;
+};
+
 inline elog::iov_pack elog_render(char* scratch, std::size_t& pos,
-                                  const Item& it) noexcept {
-    using elog::elog_render;
-    elog::Iov* buf = elog::iov_scratch_alloc(5);
+                                  const Trade& t) noexcept {
+    using elog::elog_render;          // bring built-in overloads into scope
+    elog::Iov* buf = elog::iov_scratch_alloc(8);
 
-    // Numeric field: render into the byte scratch, take that segment.
-    std::size_t old = pos;
-    elog_render(scratch, pos, it.id);              // writes into scratch
-    buf[0] = elog::Iov{"id=", 3};
-    buf[1] = elog::Iov{scratch + old, pos - old};  // pointer into scratch
+    buf[0] = {"symbol=", 7};                                       // .rodata
+    buf[1] = elog_render(scratch, pos, t.symbol);                  // borrowed
+    buf[2] = {" price=", 7};
+    buf[3] = elog_render(scratch, pos, elog::fixed(t.price, 4));   // into scratch
+    buf[4] = {" vol=", 5};
+    buf[5] = elog_render(scratch, pos, t.volume);                  // into scratch
+    buf[6] = {" side=", 6};
+    buf[7] = elog_render(scratch, pos, t.is_buy ? "BUY" : "SELL"); // .rodata
 
-    // String field: borrow the source.
-    buf[2] = elog::Iov{" name=", 6};
-    buf[3] = elog::Iov{it.name.data(), it.name.size()};
-    buf[4] = elog::Iov{" }", 2};
-    return elog::iov_pack(buf, 5);
+    return elog::iov_pack(buf, 8);
 }
+}  // namespace trading
+
+trading::Trade t{"AAPL", 150.25, 1000, true};
+LOG_INFO_F("trade: {}", t);
+// trade: symbol=AAPL price=150.2500 vol=1000 side=BUY
 ```
+
+#### How `elog_render`'s return value covers all three sources
+
+The `Iov` returned by a built-in `elog_render` already encodes where the
+bytes live:
+
+| Argument type | What `elog_render` does | Returned `Iov.base` points at |
+|---|---|---|
+| `int`, `unsigned`, `long`, ... | writes ASCII digits into `scratch + pos`, advances `pos` | `scratch + old_pos` |
+| `double`, `elog::fixed(d, prec)`, `elog::hex`, `elog::bin` | renders into scratch | `scratch + old_pos` |
+| `bool` | returns `Iov{"true",4}` or `Iov{"false",5}` | `.rodata` |
+| `const char*`, `char[N]` | returns `Iov{ptr, len}` | source / `.rodata` |
+| `std::string`, `string_ref` | returns `Iov{data, size}` | source memory |
+| custom type with `Iov`-returning renderer | the user's logic, typically into scratch | typically `scratch + old_pos` |
+
+So you can chain `elog_render(scratch, pos, ...)` calls — each one's
+returned `Iov` is exactly the segment to put into the pack. `scratch` and
+`pos` accumulate naturally across the calls. The pattern is uniform and
+copy-paste-friendly.
+
+#### Mixing wrappers
+
+```cpp
+buf[N] = elog_render(scratch, pos, elog::pad_left(value, 8, '0'));
+buf[N] = elog_render(scratch, pos, elog::hex(addr));
+buf[N] = elog_render(scratch, pos, elog::quoted(text));
+```
+
+Wrappers like `pad_left`, `hex`, `bin`, `oct`, `fixed`, `escaped`,
+`quoted`, `hexdump` all render into `scratch` and return an `Iov` you
+can drop into the pack.
 
 ### Backing-storage lifetime
 
@@ -237,15 +288,19 @@ loop. The overhead is still small (a few ns).
 
 ---
 
-## Choosing between the two
+## Choosing between Pattern 1 and Pattern 2
 
 ```cpp
-// All-numeric Vec3 — render-to-scratch is the right pattern.
+// All-numeric type — Pattern 1 (Iov return into scratch) is simplest.
 LOG_INFO_F("at = {}", geom::Vec3{1.0, 2.0, 3.0});
 
-// String-bearing record — iov_pack keeps name and ip zero-copy.
-LOG_INFO_F("user: {}", elog::iov_pack(pieces));
+// String-bearing record — Pattern 2 (iov_pack return) keeps strings zero-copy.
+LOG_INFO_F("user: {}", record);
 
-// Mixed — both patterns in the same call.
-LOG_INFO_F("op n={} record: {}", count, elog::iov_pack(pieces));
+// Mixed numeric + string + literals in one type — Pattern 2 plus the
+// mixing technique above (chain elog_render calls).
+LOG_INFO_F("trade: {}", trade);
+
+// Multiple types, some pack-returning some not — combine freely.
+LOG_INFO_F("count={} record: {}", count, record);
 ```

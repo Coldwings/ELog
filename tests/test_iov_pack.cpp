@@ -139,6 +139,45 @@ TEST(IovPack, CustomTypeReturnsIovPack) {
     EXPECT_TRUE(found_val) << "value string was not borrowed";
 }
 
+// ---- Mixed: strings borrowed + numerics through built-in renderers ----
+
+namespace mixed_user {
+struct Sample {
+    std::string label;
+    double      value;
+    int         seq;
+};
+
+inline elog::iov_pack elog_render(char* scratch, std::size_t& pos,
+                                  const Sample& s) noexcept {
+    using elog::elog_render;
+    elog::Iov* buf = elog::iov_scratch_alloc(6);
+    buf[0] = {"label=", 6};
+    buf[1] = elog_render(scratch, pos, s.label);                   // borrowed
+    buf[2] = {" v=", 3};
+    buf[3] = elog_render(scratch, pos, elog::fixed(s.value, 3));   // scratch
+    buf[4] = {" #", 2};
+    buf[5] = elog_render(scratch, pos, s.seq);                     // scratch
+    return elog::iov_pack(buf, 6);
+}
+}  // namespace mixed_user
+
+TEST(IovPack, MixedScratchBorrowedAndLiteral) {
+    Probe p;
+    mixed_user::Sample s{"latency", 12.345, 42};
+    LOGGER_F(p.L, elog::Level::INFO, "metric: {}", s);
+    ASSERT_EQ(p.raw->count, 1);
+    EXPECT_NE(p.raw->lines[0].find("metric: label=latency v=12.345 #42"),
+              std::string::npos);
+
+    // The string member must still be borrowed (zero-copy).
+    bool found_label = false;
+    for (const void* ptr : p.raw->all_pointers[0]) {
+        if (ptr == s.label.data()) found_label = true;
+    }
+    EXPECT_TRUE(found_label) << "label was not borrowed zero-copy";
+}
+
 TEST(IovPack, TwoSameTypeInstancesNoClobber) {
     Probe p;
     zerocopy_user::Pair a{"first", "alpha"};

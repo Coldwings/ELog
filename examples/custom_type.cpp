@@ -51,6 +51,39 @@ inline elog::iov_pack elog_render(char* /*scratch*/, std::size_t& /*pos*/,
 }
 }  // namespace audit
 
+// ---- Pattern 3: mixed — strings borrowed, numbers via existing renderers ----
+// A more realistic case: some fields are strings (zero-copy), some need
+// numeric formatting (elog::fixed, int rendering). Compose by calling the
+// built-in elog_render for each field and storing the returned Iov into the
+// pack buffer. Each call writes into either the byte scratch (numbers) or
+// returns a borrowed pointer (strings, literal char arrays) — iov_pack
+// glues all three sources together with no extra copying.
+namespace trading {
+struct Trade {
+    std::string symbol;
+    double price;
+    int volume;
+    bool is_buy;
+};
+
+inline elog::iov_pack elog_render(char* scratch, std::size_t& pos,
+                                  const Trade& t) noexcept {
+    using elog::elog_render;          // bring built-in overloads into scope
+    elog::Iov* buf = elog::iov_scratch_alloc(8);
+
+    buf[0] = {"symbol=", 7};                                       // .rodata
+    buf[1] = elog_render(scratch, pos, t.symbol);                  // borrowed
+    buf[2] = {" price=", 7};
+    buf[3] = elog_render(scratch, pos, elog::fixed(t.price, 4));   // into scratch
+    buf[4] = {" vol=", 5};
+    buf[5] = elog_render(scratch, pos, t.volume);                  // into scratch
+    buf[6] = {" side=", 6};
+    buf[7] = elog_render(scratch, pos, t.is_buy ? "BUY" : "SELL"); // .rodata
+
+    return elog::iov_pack(buf, 8);
+}
+}  // namespace trading
+
 int main() {
     auto& L = elog::default_logger();
     L.set_level(elog::Level::DEBUG);
@@ -72,6 +105,13 @@ int main() {
     // gets its own range out of emit_f's scratch.
     audit::UserRecord admin{"admin", "10.0.0.2"};
     LOG_INFO_F("from {} to {}", user, admin);
+
+    // Mixed: strings zero-copy + numbers through the byte scratch via
+    // built-in fixed/int renderers, all stitched by iov_pack.
+    trading::Trade t1{"AAPL", 150.25, 1000, true};
+    trading::Trade t2{"GOOG", 2735.5, 50, false};
+    LOG_INFO_F("trade: {}", t1);
+    LOG_INFO_F("two trades: {} | {}", t1, t2);
 
     return 0;
 }
