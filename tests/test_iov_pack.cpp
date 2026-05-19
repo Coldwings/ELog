@@ -112,9 +112,9 @@ struct Pair {
 
 inline elog::iov_pack elog_render(char* /*scratch*/, std::size_t& /*pos*/,
                                   const Pair& p) noexcept {
-    // Each instance has its own thread_local 8-Iov buffer so multiple
-    // Pairs in the same LOG don't clobber each other.
-    static thread_local elog::Iov buf[4];
+    // Allocate from emit_f's per-call iov scratch. Each render call gets
+    // its own range so multiple Pairs in the same LOG don't collide.
+    elog::Iov* buf = elog::iov_scratch_alloc(3);
     buf[0] = {p.key.data(), p.key.size()};
     buf[1] = {"=", 1};
     buf[2] = {p.value.data(), p.value.size()};
@@ -137,4 +137,26 @@ TEST(IovPack, CustomTypeReturnsIovPack) {
     }
     EXPECT_TRUE(found_key) << "key string was not borrowed";
     EXPECT_TRUE(found_val) << "value string was not borrowed";
+}
+
+TEST(IovPack, TwoSameTypeInstancesNoClobber) {
+    Probe p;
+    zerocopy_user::Pair a{"first", "alpha"};
+    zerocopy_user::Pair b{"second", "beta"};
+    LOGGER_F(p.L, elog::Level::INFO, "{} | {}", a, b);
+    ASSERT_EQ(p.raw->count, 1);
+    EXPECT_NE(p.raw->lines[0].find("first=alpha | second=beta"),
+              std::string::npos);
+
+    // All four strings should be borrowed at distinct addresses.
+    bool found_a_key = false, found_a_val = false;
+    bool found_b_key = false, found_b_val = false;
+    for (const void* ptr : p.raw->all_pointers[0]) {
+        if (ptr == a.key.data())    found_a_key = true;
+        if (ptr == a.value.data())  found_a_val = true;
+        if (ptr == b.key.data())    found_b_key = true;
+        if (ptr == b.value.data())  found_b_val = true;
+    }
+    EXPECT_TRUE(found_a_key && found_a_val && found_b_key && found_b_val)
+        << "scratch allocator clobbered earlier render's iovs";
 }

@@ -157,6 +157,18 @@ emit_f(Logger& logger, Level lvl, const char* file, int line,
     logger.prologue_fn()(scratch, pos, pro, ctx);
 
     constexpr std::size_t NA = sizeof...(Args) == 0 ? 1 : sizeof...(Args);
+    constexpr std::size_t kPackMax = 32;
+
+    // Per-call iov scratch for pack-returning renderers. Stable for the
+    // entire LOG call so iov_pack base pointers remain valid through iov
+    // assembly. iov_scratch_alloc() in iov_pack.hpp lets renderers carve
+    // ranges out of this without needing their own thread_local storage.
+    Iov iov_pool[NA * kPackMax];
+    IovScratchCtx pool_ctx{iov_pool, NA * kPackMax, 0};
+    auto*& tls_slot = ::elog::detail::tls_iov_ctx();
+    IovScratchCtx* prev_ctx = tls_slot;
+    tls_slot = &pool_ctx;
+
     ArgSlot arg_slots[NA];
     arg_slots[0] = ArgSlot{nullptr, 0, Iov{nullptr, 0}};
     int idx = 0;
@@ -166,10 +178,6 @@ emit_f(Logger& logger, Level lvl, const char* file, int line,
          ++idx, 0)...};
     (void)idx;
 
-    // Worst case: each hole is an iov_pack carrying up to kPackMax entries.
-    // 32 covers typical structured-log fan-outs; larger users should split
-    // the LOG call.
-    constexpr std::size_t kPackMax = 32;
     constexpr std::size_t IC = N * kPackMax + 2;
     iovec iov[IC];
     int ic = 0;
@@ -203,6 +211,8 @@ emit_f(Logger& logger, Level lvl, const char* file, int line,
     iov[ic].iov_base = const_cast<void*>(static_cast<const void*>(&nl));
     iov[ic].iov_len = 1;
     ++ic;
+
+    tls_slot = prev_ctx;       // restore previous (or null) context
 
     logger.emit(lvl, iov, ic);
 }

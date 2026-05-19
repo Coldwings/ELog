@@ -97,11 +97,11 @@ struct UserRecord {
 
 inline elog::iov_pack elog_render(char* /*scratch*/, std::size_t& /*pos*/,
                                   const UserRecord& r) noexcept {
-    static thread_local elog::Iov buf[4];
+    elog::Iov* buf = elog::iov_scratch_alloc(4);  // ELog-managed scratch
     buf[0] = {"name=", 5};
-    buf[1] = {r.name.data(), r.name.size()};       // borrowed (zero-copy)
+    buf[1] = {r.name.data(), r.name.size()};      // borrowed (zero-copy)
     buf[2] = {" ip=", 4};
-    buf[3] = {r.ip.data(), r.ip.size()};           // borrowed (zero-copy)
+    buf[3] = {r.ip.data(), r.ip.size()};          // borrowed (zero-copy)
     return elog::iov_pack(buf, 4);
 }
 }  // namespace audit
@@ -119,9 +119,9 @@ fields with borrowed pointers in one pack:
 inline elog::iov_pack elog_render(char* scratch, std::size_t& pos,
                                   const Item& it) noexcept {
     using elog::elog_render;
-    static thread_local elog::Iov buf[5];
+    elog::Iov* buf = elog::iov_scratch_alloc(5);
 
-    // Numeric field: render into scratch, take that segment.
+    // Numeric field: render into the byte scratch, take that segment.
     std::size_t old = pos;
     elog_render(scratch, pos, it.id);              // writes into scratch
     buf[0] = elog::Iov{"id=", 3};
@@ -138,21 +138,35 @@ inline elog::iov_pack elog_render(char* scratch, std::size_t& pos,
 ### Backing-storage lifetime
 
 The `iov_pack` returned does not own — it's a `{base, count}` view. The
-storage `base` points at must remain valid until `LOG_*_F` returns. The
-common patterns:
+storage `base` points at must remain valid until `LOG_*_F` returns.
 
-- **Per-type `static thread_local` array** (shown above). Each custom
-  type uses its own buffer, so multiple distinct pack-returning types
-  in one LOG call don't collide. Two instances of the *same* type in
-  one LOG call DO collide — see "Limits" below.
-- **Function-local stack array, returned via the pack** — fine if the
-  function inlines and the array lives on the caller's frame, which gcc
-  and clang handle correctly when the renderer is `inline`.
+**Recommended:** allocate from `elog::iov_scratch_alloc(n)` (shown above).
+This carves a range out of the per-LOG-call scratch buffer that emit_f
+sets up. The returned pointer is stable for the entire LOG call, and each
+call to `iov_scratch_alloc` returns a fresh range — so logging two
+instances of the same type in one `LOG_*_F` is safe, the second render's
+iovs do not clobber the first's. Returns `nullptr` if called outside an
+emit_f context or if scratch is exhausted (capacity is `kPackMax` per
+arg, default 32).
+
+Other valid storage choices:
+
 - **A member buffer of the value being logged** — works if the value
   itself outlives the LOG call.
+- **The byte `scratch` buffer** is also valid for the duration of the
+  LOG — any iov segment that points into `scratch` is safe. This lets
+  you mix borrowed string members and rendered numeric members in one
+  pack (see "Mixing rendered and borrowed segments" below).
 
-The `scratch` buffer is also valid for the duration of the LOG, so any
-segment that points into `scratch` is safe.
+**Avoid:**
+
+- Function-local stack arrays returned via `iov_pack` — the array dies
+  when the renderer returns and emit_f reads from it later. Undefined
+  behavior, even though it sometimes appears to work due to stack reuse.
+- `static thread_local Iov[]` per-type — the storage is shared across
+  all instances of the same type, so two same-type values in one LOG
+  call clobber each other. `iov_scratch_alloc` exists specifically to
+  avoid this.
 
 ### When to prefer Pattern 2
 
@@ -210,15 +224,16 @@ loop. The overhead is still small (a few ns).
 
 ## Limits
 
-- Up to 32 iov entries per `iov_pack` per LOG call. Larger packs are
-  silently truncated.
-- A `static thread_local` backing buffer is **per-type, not per-instance**.
-  If you log two values of the same custom type in one `LOG_*_F`, the
-  second call overwrites the first's buffer before `emit_f` reads it.
-  Use a function-local buffer (returned via `iov_pack`) or split into
-  two LOG calls if you need this.
-- The pack itself must be fully formed at the LOG site (or by the time
-  `elog_render` returns) — `emit_f` reads it synchronously.
+- Up to 32 iov entries per `iov_pack` per arg. Larger packs are silently
+  truncated.
+- The aggregate iov-scratch capacity is `32 × number-of-args` Iov slots
+  per LOG call. Practically unbounded for typical structured logs.
+- The pack itself must be fully formed by the time `elog_render` returns
+  — `emit_f` reads it synchronously when assembling the iovec.
+- `iov_scratch_alloc(n)` returns `nullptr` if called outside an emit_f
+  (e.g. from a unit test that calls `elog_render` directly without going
+  through `LOG_*_F`). For testing isolated renderers, supply your own
+  buffer.
 
 ---
 

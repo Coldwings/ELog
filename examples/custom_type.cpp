@@ -39,9 +39,10 @@ struct UserRecord {
 
 inline elog::iov_pack elog_render(char* /*scratch*/, std::size_t& /*pos*/,
                                   const UserRecord& r) noexcept {
-    // Per-type thread_local backing buffer. Stable across the whole LOG
-    // call since each pack-returning custom type uses its own storage.
-    static thread_local elog::Iov buf[4];
+    // Allocate from emit_f's per-call iov scratch. The returned pointer is
+    // stable for the entire LOG call, and each renderer invocation gets its
+    // own range — so logging two UserRecords in the same LOG is safe.
+    elog::Iov* buf = elog::iov_scratch_alloc(4);
     buf[0] = {"name=", 5};
     buf[1] = {r.name.data(), r.name.size()};       // borrowed
     buf[2] = {" ip=", 4};
@@ -66,6 +67,11 @@ int main() {
     // iov_pack; the strings stay zero-copy all the way to writev.
     audit::UserRecord user{"alice", "10.0.0.1"};
     LOG_INFO_F("user: {}", user);
+
+    // Two instances of the same type in one LOG also work — each render
+    // gets its own range out of emit_f's scratch.
+    audit::UserRecord admin{"admin", "10.0.0.2"};
+    LOG_INFO_F("from {} to {}", user, admin);
 
     return 0;
 }
