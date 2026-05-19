@@ -73,9 +73,7 @@ int main() {
         L.emit(elog::Level::INFO, &iov, 1);
     });
 
-    std::printf("--- sink->write directly ---\n");
-    auto& sink = *static_cast<NullSink*>(nullptr);
-    (void)sink;
+    std::printf("--- raw clock cost ---\n");
     bench("now() syscall only",                  5'000'000, [&]{
         auto v = std::chrono::system_clock::now();
         (void)v;
