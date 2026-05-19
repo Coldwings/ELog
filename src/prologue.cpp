@@ -18,13 +18,6 @@ inline std::size_t write_two(char* p, unsigned v) noexcept {
     return 2;
 }
 
-inline std::size_t write_three(char* p, unsigned v) noexcept {
-    p[0] = static_cast<char>('0' + (v / 100));
-    p[1] = static_cast<char>('0' + ((v / 10) % 10));
-    p[2] = static_cast<char>('0' + (v % 10));
-    return 3;
-}
-
 inline std::size_t write_six(char* p, unsigned v) noexcept {
     p[0] = static_cast<char>('0' + (v / 100000));
     p[1] = static_cast<char>('0' + ((v / 10000) % 10));

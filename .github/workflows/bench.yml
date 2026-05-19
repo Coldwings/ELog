@@ -41,11 +41,8 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DELOG_BUILD_COMPARE=ON
 
-      - name: Build all benchmark binaries
-        run: |
-          cmake --build build -j --target \
-            bench_basic bench_perf bench_ablation bench_everyn \
-            bench_itoa bench_compose bench_compare
+      - name: Build everything (tests + benchmarks)
+        run: cmake --build build -j
 
       - name: Run unit tests (sanity)
         run: ctest --test-dir build --output-on-failure -j

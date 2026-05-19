@@ -9,5 +9,5 @@ set(ELOG_EXAMPLES
 foreach(e ${ELOG_EXAMPLES})
     add_executable(${e} ${e}.cpp)
     target_link_libraries(${e} PRIVATE elog)
-    target_compile_options(${e} PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_options(${e} PRIVATE -Wall -Wextra)
 endforeach()

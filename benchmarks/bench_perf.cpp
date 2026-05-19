@@ -42,7 +42,8 @@ public:
     DevNullWritev() : fd_(::open("/dev/null", O_WRONLY)) {}
     ~DevNullWritev() override { if (fd_ >= 0) ::close(fd_); }
     void write(elog::Level, const iovec* iov, int n) override {
-        ::writev(fd_, iov, n);
+        ssize_t w = ::writev(fd_, iov, n);
+        (void)w;
     }
 private:
     int fd_;

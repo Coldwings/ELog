@@ -43,7 +43,7 @@ target_include_directories(elog PUBLIC
     $<INSTALL_INTERFACE:include>
 )
 
-target_compile_options(elog PRIVATE -Wall -Wextra -Wpedantic)
+target_compile_options(elog PRIVATE -Wall -Wextra)
 target_compile_features(elog PUBLIC cxx_std_14)
 
 find_package(Threads REQUIRED)

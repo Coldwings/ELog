@@ -31,6 +31,6 @@ set(ELOG_TESTS
 foreach(t ${ELOG_TESTS})
     add_executable(${t} ${t}.cpp)
     target_link_libraries(${t} PRIVATE elog gtest gtest_main)
-    target_compile_options(${t} PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_options(${t} PRIVATE -Wall -Wextra)
     gtest_discover_tests(${t})
 endforeach()
