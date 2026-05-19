@@ -26,25 +26,28 @@ inline elog::Iov elog_render(char* scratch, std::size_t& pos, const Vec3& v) noe
 }
 }  // namespace geom
 
-// ---- Pattern 2: string-bearing custom type, zero-copy via iov_pack ----
-// When a record contains std::string / string_ref members, building a one-off
-// iov_pack lets each string flow through writev as a borrowed iovec entry —
-// no memcpy into scratch.
+// ---- Pattern 2: string-bearing custom type, zero-copy via iov_pack return ----
+// elog_render returns iov_pack instead of Iov; ELog detects this at compile
+// time (SFINAE) and routes the type through the multi-iov path. Each string
+// member flows through writev as a borrowed iovec entry — no memcpy, no
+// intermediate buffer.
 namespace audit {
 struct UserRecord {
     std::string name;
     std::string ip;
-
-    // Build an iov_pack pointing at our string members. The returned pack
-    // borrows from `pieces` and from `*this`; both must outlive the LOG call.
-    // The simplest pattern is to construct on the stack right at the call site.
-    void as_iov(std::vector<elog::Iov>& pieces) const {
-        pieces.push_back({"name=", 5});
-        pieces.push_back({name.data(), name.size()});       // borrowed
-        pieces.push_back({" ip=", 4});
-        pieces.push_back({ip.data(), ip.size()});           // borrowed
-    }
 };
+
+inline elog::iov_pack elog_render(char* /*scratch*/, std::size_t& /*pos*/,
+                                  const UserRecord& r) noexcept {
+    // Per-type thread_local backing buffer. Stable across the whole LOG
+    // call since each pack-returning custom type uses its own storage.
+    static thread_local elog::Iov buf[4];
+    buf[0] = {"name=", 5};
+    buf[1] = {r.name.data(), r.name.size()};       // borrowed
+    buf[2] = {" ip=", 4};
+    buf[3] = {r.ip.data(), r.ip.size()};           // borrowed
+    return elog::iov_pack(buf, 4);
+}
 }  // namespace audit
 
 int main() {
@@ -59,12 +62,10 @@ int main() {
     std::vector<int> ids = {3, 1, 4, 1, 5, 9};
     LOG_INFO_F("ids = {}", ids);
 
-    // String-bearing custom type via iov_pack — zero-copy on name and ip.
+    // String-bearing custom type — pass it directly. elog_render returns
+    // iov_pack; the strings stay zero-copy all the way to writev.
     audit::UserRecord user{"alice", "10.0.0.1"};
-    std::vector<elog::Iov> pieces;
-    pieces.reserve(8);
-    user.as_iov(pieces);
-    LOG_INFO_F("user: {}", elog::iov_pack(pieces));
+    LOG_INFO_F("user: {}", user);
 
     return 0;
 }

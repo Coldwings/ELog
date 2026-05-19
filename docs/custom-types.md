@@ -80,37 +80,109 @@ renderers rely on.
 
 ---
 
-## Pattern 2: `iov_pack` for composite zero-copy
+## Pattern 2: `elog_render` returning `iov_pack`
 
-When the value carries strings or external buffers you want to ship to
-`writev` without an intermediate copy, build a list of `Iov` and wrap it
-with `elog::iov_pack`. ELog detects the wrapper at compile time and
-splices its entries directly into the per-call iovec.
+For composite values that carry `std::string` / `string_ref` / borrowed
+buffers, return `iov_pack` from `elog_render` instead of `Iov`. ELog
+detects the return type at compile time (SFINAE) and routes the type
+through the multi-iov path. Strings flow as borrowed iovec entries
+straight into `writev`.
 
 ```cpp
 namespace audit {
 struct UserRecord {
     std::string name;
     std::string ip;
-
-    void as_iov(std::vector<elog::Iov>& out) const {
-        out.push_back({"name=", 5});
-        out.push_back({name.data(), name.size()});   // borrowed
-        out.push_back({" ip=", 4});
-        out.push_back({ip.data(), ip.size()});       // borrowed
-    }
 };
+
+inline elog::iov_pack elog_render(char* /*scratch*/, std::size_t& /*pos*/,
+                                  const UserRecord& r) noexcept {
+    static thread_local elog::Iov buf[4];
+    buf[0] = {"name=", 5};
+    buf[1] = {r.name.data(), r.name.size()};       // borrowed (zero-copy)
+    buf[2] = {" ip=", 4};
+    buf[3] = {r.ip.data(), r.ip.size()};           // borrowed (zero-copy)
+    return elog::iov_pack(buf, 4);
 }
+}  // namespace audit
 
 audit::UserRecord r{"alice", "10.0.0.1"};
-std::vector<elog::Iov> pieces;
-pieces.reserve(8);
-r.as_iov(pieces);
-LOG_INFO_F("user: {}", elog::iov_pack(pieces));
+LOG_INFO_F("user: {}", r);
 // user: name=alice ip=10.0.0.1
 ```
 
-### Constructors
+The signature is the same as Pattern 1 except the return type. The same
+`scratch` and `pos` are still available — you can mix render-to-scratch
+fields with borrowed pointers in one pack:
+
+```cpp
+inline elog::iov_pack elog_render(char* scratch, std::size_t& pos,
+                                  const Item& it) noexcept {
+    using elog::elog_render;
+    static thread_local elog::Iov buf[5];
+
+    // Numeric field: render into scratch, take that segment.
+    std::size_t old = pos;
+    elog_render(scratch, pos, it.id);              // writes into scratch
+    buf[0] = elog::Iov{"id=", 3};
+    buf[1] = elog::Iov{scratch + old, pos - old};  // pointer into scratch
+
+    // String field: borrow the source.
+    buf[2] = elog::Iov{" name=", 6};
+    buf[3] = elog::Iov{it.name.data(), it.name.size()};
+    buf[4] = elog::Iov{" }", 2};
+    return elog::iov_pack(buf, 5);
+}
+```
+
+### Backing-storage lifetime
+
+The `iov_pack` returned does not own — it's a `{base, count}` view. The
+storage `base` points at must remain valid until `LOG_*_F` returns. The
+common patterns:
+
+- **Per-type `static thread_local` array** (shown above). Each custom
+  type uses its own buffer, so multiple distinct pack-returning types
+  in one LOG call don't collide. Two instances of the *same* type in
+  one LOG call DO collide — see "Limits" below.
+- **Function-local stack array, returned via the pack** — fine if the
+  function inlines and the array lives on the caller's frame, which gcc
+  and clang handle correctly when the renderer is `inline`.
+- **A member buffer of the value being logged** — works if the value
+  itself outlives the LOG call.
+
+The `scratch` buffer is also valid for the duration of the LOG, so any
+segment that points into `scratch` is safe.
+
+### When to prefer Pattern 2
+
+- Any value with `std::string` / `string_ref` / external pointer members
+  you want zero-copy.
+- Mixed structures where some fields render to text and some are
+  borrowed — Pattern 2 lets you mix in one pack.
+- Types where you'd otherwise have to manually `memcpy` borrowed strings
+  into `scratch` to fit a single-Iov return.
+
+For pure-numeric types Pattern 1 is simpler and equally fast.
+
+## Direct `iov_pack` argument
+
+If you already have a `std::vector<Iov>` (or `std::array<Iov, N>`, or a C
+array of `Iov`) at the call site, you can pass it directly without
+defining a custom renderer:
+
+```cpp
+std::vector<elog::Iov> pieces;
+pieces.push_back({"key=", 4});
+pieces.push_back({k.data(), k.size()});
+pieces.push_back({" val=", 5});
+pieces.push_back({v.data(), v.size()});
+LOG_INFO_F("entry: {}", elog::iov_pack(pieces));
+```
+
+Useful at boundaries with existing iovec-shaped APIs.
+
+## Constructors of `iov_pack`
 
 ```cpp
 elog::iov_pack(const Iov*, std::size_t n);
@@ -119,36 +191,34 @@ elog::iov_pack(const std::array<Iov, N>&);
 elog::iov_pack(const Iov (&)[N]);
 ```
 
-The pack does **not** own. The underlying iov entries (and whatever they
-point at) must outlive the LOG call.
+## Compile-time dispatch and overhead
 
-### Compile-time dispatch
+Whether a `LOG_*_F` call uses the pack code path is determined entirely
+at compile time. ELog inspects each arg:
 
-Whether a LOG_*_F call uses the pack code path is determined entirely at
-compile time. If none of the arguments is `iov_pack`, you get the original
-fast path with the iovec array sized at compile time and no extra overhead
-of any kind. If at least one argument is a pack, ELog's `emit_f` switches
-to a slightly larger iovec array (32 entries per pack max) and a runtime
-expansion loop. So you can adopt `iov_pack` for some call sites without
-slowing down the rest.
+- Static type is `iov_pack` → pack path
+- `elog_render(...)` for the static type returns `iov_pack` → pack path
+- Otherwise → the simple Iov path
 
-### When to prefer this over Pattern 1
+If **no** arg falls into either pack category, you get the original
+fully-unrolled fast path. The extension is zero-cost for code that
+doesn't use it.
 
-- The type has `std::string` or `string_ref` members and you want
-  zero-copy.
-- The number of segments is dynamic (e.g. you append iov entries in a
-  loop based on data shape).
-- You're at the boundary between an existing iovec-style API (e.g.
-  `iovec[]` from elsewhere) and the logger.
+If at least one arg is pack-typed, `emit_f` switches to a slightly
+larger iovec array (32 entries per pack max) and a runtime expansion
+loop. The overhead is still small (a few ns).
 
-For pure-numeric types Pattern 1 is simpler. The two coexist fine.
-
-### Limits
+## Limits
 
 - Up to 32 iov entries per `iov_pack` per LOG call. Larger packs are
-  silently truncated. If you genuinely need more, split the LOG call.
-- The pack itself must be a fully-formed range at the LOG site — its
-  storage must already be filled.
+  silently truncated.
+- A `static thread_local` backing buffer is **per-type, not per-instance**.
+  If you log two values of the same custom type in one `LOG_*_F`, the
+  second call overwrites the first's buffer before `emit_f` reads it.
+  Use a function-local buffer (returned via `iov_pack`) or split into
+  two LOG calls if you need this.
+- The pack itself must be fully formed at the LOG site (or by the time
+  `elog_render` returns) — `emit_f` reads it synchronously.
 
 ---
 

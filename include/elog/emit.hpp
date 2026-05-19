@@ -23,10 +23,32 @@ namespace detail {
 template <class T> struct is_pack : std::false_type {};
 template <> struct is_pack<iov_pack> : std::true_type {};
 
+// SFINAE: does ADL elog_render(char*, size_t&, T) return iov_pack?
+// Renderers that opt into multi-iov return iov_pack instead of Iov; emit_f
+// detects this at compile time and dispatches to the pack path.
+template <class T>
+auto render_result_probe(int) -> decltype(
+    elog_render(std::declval<char*>(),
+                std::declval<std::size_t&>(),
+                std::declval<const T&>()));
+template <class T>
+void render_result_probe(...);
+
+template <class T>
+struct render_returns_pack : std::is_same<
+    decltype(render_result_probe<T>(0)),
+    iov_pack
+> {};
+
+template <class T>
+struct treats_as_pack : std::integral_constant<bool,
+    is_pack<typename std::decay<T>::type>::value ||
+    render_returns_pack<typename std::decay<T>::type>::value> {};
+
 template <class... Args> struct any_pack : std::false_type {};
 template <class T, class... Rest>
 struct any_pack<T, Rest...> : std::conditional<
-    is_pack<typename std::decay<T>::type>::value,
+    treats_as_pack<T>::value,
     std::true_type,
     any_pack<Rest...>>::type {};
 
@@ -92,14 +114,30 @@ struct ArgSlot {
     Iov single;               // used iff base == nullptr
 };
 
+// Renderer returns Iov: wrap as single.
 template <class T>
-inline typename std::enable_if<!is_pack<typename std::decay<T>::type>::value,
-                               ArgSlot>::type
+inline typename std::enable_if<
+    !is_pack<typename std::decay<T>::type>::value &&
+    !render_returns_pack<typename std::decay<T>::type>::value,
+    ArgSlot>::type
 make_arg_slot(char* scratch, std::size_t& pos, T&& v) {
     using ::elog::elog_render;
     return ArgSlot{nullptr, 0, elog_render(scratch, pos, std::forward<T>(v))};
 }
 
+// Renderer returns iov_pack: take its segments directly.
+template <class T>
+inline typename std::enable_if<
+    !is_pack<typename std::decay<T>::type>::value &&
+    render_returns_pack<typename std::decay<T>::type>::value,
+    ArgSlot>::type
+make_arg_slot(char* scratch, std::size_t& pos, T&& v) {
+    using ::elog::elog_render;
+    iov_pack p = elog_render(scratch, pos, std::forward<T>(v));
+    return ArgSlot{p.base, p.count, Iov{nullptr, 0}};
+}
+
+// Argument is iov_pack itself.
 inline ArgSlot make_arg_slot(char* /*scratch*/, std::size_t& /*pos*/,
                              const iov_pack& p) {
     return ArgSlot{p.base, p.count, Iov{nullptr, 0}};

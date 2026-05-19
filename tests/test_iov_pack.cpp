@@ -101,3 +101,40 @@ TEST(IovPack, MixedWithRegularArgs) {
     EXPECT_NE(p.raw->lines[0].find("n=42 pieces=XY done=true"),
               std::string::npos);
 }
+
+// ---- Custom type whose elog_render returns iov_pack ----
+
+namespace zerocopy_user {
+struct Pair {
+    std::string key;
+    std::string value;
+};
+
+inline elog::iov_pack elog_render(char* /*scratch*/, std::size_t& /*pos*/,
+                                  const Pair& p) noexcept {
+    // Each instance has its own thread_local 8-Iov buffer so multiple
+    // Pairs in the same LOG don't clobber each other.
+    static thread_local elog::Iov buf[4];
+    buf[0] = {p.key.data(), p.key.size()};
+    buf[1] = {"=", 1};
+    buf[2] = {p.value.data(), p.value.size()};
+    return elog::iov_pack(buf, 3);
+}
+}  // namespace zerocopy_user
+
+TEST(IovPack, CustomTypeReturnsIovPack) {
+    Probe p;
+    zerocopy_user::Pair kv{"name", "alice"};
+    LOGGER_F(p.L, elog::Level::INFO, "kv: {}", kv);
+    ASSERT_EQ(p.raw->count, 1);
+    EXPECT_NE(p.raw->lines[0].find("kv: name=alice"), std::string::npos);
+
+    // Strings should still be borrowed pointers.
+    bool found_key = false, found_val = false;
+    for (const void* ptr : p.raw->all_pointers[0]) {
+        if (ptr == kv.key.data())   found_key = true;
+        if (ptr == kv.value.data()) found_val = true;
+    }
+    EXPECT_TRUE(found_key) << "key string was not borrowed";
+    EXPECT_TRUE(found_val) << "value string was not borrowed";
+}
