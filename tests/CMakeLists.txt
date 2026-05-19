@@ -22,6 +22,7 @@ set(ELOG_TESTS
     test_writev_atomicity
     test_rotating_sink
     test_buffered_file_sink
+    test_iov_pack
     test_registry
     test_tie
     test_aggregate

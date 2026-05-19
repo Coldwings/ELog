@@ -101,6 +101,33 @@ LOG_INFO_F("map = {}",                               std::map<std::string,int>{{
 LOG_INFO_F("joined = {}",                            elog::join(items, ", "));
 ```
 
+## Composite zero-copy via `iov_pack`
+
+When you have N segments (some borrowed from existing buffers, some owned)
+that you want to log as one logical value with zero-copy preserved
+end-to-end, build a list of `Iov` and wrap it with `elog::iov_pack`. ELog
+splices the entries directly into the per-call iovec — no memcpy, no
+intermediate buffer.
+
+```cpp
+std::vector<elog::Iov> pieces;
+pieces.push_back({"key=", 4});
+pieces.push_back({k.data(), k.size()});       // borrowed (zero-copy)
+pieces.push_back({" val=", 5});
+pieces.push_back({v.data(), v.size()});       // borrowed (zero-copy)
+LOG_INFO_F("entry: {}", elog::iov_pack(pieces));
+```
+
+The pack itself is just a `{base, count}` view; it does not own the iov
+entries. They must outlive the LOG call (same lifetime rule as string args
+borrowed via `Iov`). The dispatch is fully compile-time: a LOG call with no
+`iov_pack` argument compiles to the original fast path with zero overhead;
+LOG calls with a pack get a slightly different code path that handles
+variable-length iov expansion.
+
+`iov_pack` constructs from `std::vector<Iov>`, `std::array<Iov, N>`, or a C
+array of `Iov`. Up to 32 entries per pack per LOG call.
+
 ## Custom types
 
 Provide a free function `elog_render` in your type's namespace:
@@ -324,6 +351,7 @@ side-by-side ratio table.
 include/elog/             # public headers
   elog.hpp                # umbrella
   iov.hpp                 # struct Iov { base, len }
+  iov_pack.hpp            # composite zero-copy wrapper for N iov segments
   level.hpp
   string_ref.hpp          # minimal {ptr, len}
   scratch.hpp             # thread_local 4 KiB
