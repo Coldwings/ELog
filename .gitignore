@@ -1,0 +1,21 @@
+# Build artifacts
+build/
+build-*/
+cmake-build-*/
+
+# Local third-party caches (handled by FetchContent at configure time)
+third_party/
+_deps/
+
+# Core dumps
+core
+core.*
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS
+.DS_Store
