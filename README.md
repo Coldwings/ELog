@@ -1,5 +1,8 @@
 # ELog
 
+[![ci](https://github.com/Coldwings/ELog/actions/workflows/ci.yml/badge.svg)](https://github.com/Coldwings/ELog/actions/workflows/ci.yml)
+[![bench](https://github.com/Coldwings/ELog/actions/workflows/bench.yml/badge.svg)](https://github.com/Coldwings/ELog/actions/workflows/bench.yml)
+
 A high-performance C++14 logging library for POSIX, designed around four
 ideas:
 
@@ -64,6 +67,15 @@ Numbers ns/op, aarch64 Linux Release. spdlog forced into `flush_on(info)`
 to match the durability contract. Full benchmark with three I/O modes,
 ablation breakdown, and methodology in
 [docs/performance.md](docs/performance.md).
+
+**Live numbers from CI** — the
+[bench workflow](https://github.com/Coldwings/ELog/actions/workflows/bench.yml)
+runs on every push to main. Each successful run's *Summary* tab renders
+the bench_basic / bench_compose / bench_compare tables inline; the
+*Artifacts* section has the raw `.txt` outputs (5 repetitions of
+bench_compare) for download. Numbers there are on x86-64 Ubuntu so they
+differ from the aarch64 snapshot above, but the relative shape is the
+same.
 
 ## Documentation
 
