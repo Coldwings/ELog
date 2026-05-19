@@ -13,37 +13,16 @@ namespace elog {
 
 namespace {
 
-constexpr const char* kTwoDigits =
-    "00010203040506070809"
-    "10111213141516171819"
-    "20212223242526272829"
-    "30313233343536373839"
-    "40414243444546474849"
-    "50515253545556575859"
-    "60616263646566676869"
-    "70717273747576777879"
-    "80818283848586878889"
-    "90919293949596979899";
-
 inline std::size_t u64_to_chars(std::uint64_t v, char* out) noexcept {
-    char buf[24];
-    char* end = buf + sizeof(buf);
-    char* p = end;
-    while (v >= 100) {
-        std::uint64_t r = v % 100;
-        v /= 100;
-        p -= 2;
-        std::memcpy(p, kTwoDigits + r * 2, 2);
+    char tmp[24];
+    int n = 0;
+    if (v == 0) { out[0] = '0'; return 1; }
+    while (v) {
+        tmp[n++] = static_cast<char>('0' + (v % 10));
+        v /= 10;
     }
-    if (v >= 10) {
-        p -= 2;
-        std::memcpy(p, kTwoDigits + v * 2, 2);
-    } else {
-        *--p = static_cast<char>('0' + v);
-    }
-    std::size_t n = static_cast<std::size_t>(end - p);
-    std::memcpy(out, p, n);
-    return n;
+    for (int i = 0; i < n; ++i) out[i] = tmp[n - 1 - i];
+    return static_cast<std::size_t>(n);
 }
 
 inline std::size_t i64_to_chars(std::int64_t v, char* out) noexcept {

@@ -14,6 +14,9 @@ add_executable(bench_everyn bench_everyn.cpp)
 target_link_libraries(bench_everyn PRIVATE elog)
 target_compile_options(bench_everyn PRIVATE -O3 -Wall -Wextra -Wpedantic)
 
+add_executable(bench_itoa bench_itoa.cpp)
+target_compile_options(bench_itoa PRIVATE -O3 -Wall -Wextra -Wpedantic)
+
 option(ELOG_BUILD_COMPARE
     "Build cross-library comparison benchmark (fetches spdlog and PhotonLibOS)"
     OFF)
